@@ -1,0 +1,13 @@
+services:
+  app:
+    image: grpo:dev
+    volumes:
+      - ./:/workspace
+    command: tail -f /dev/null
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

@@ -484,10 +484,10 @@ if __name__ == "__main__":
         batch_size=32,
         num_rollouts=32,
         beta=0.04,
-        num_devices=2,  # Use 2 GPUs by default
+        num_devices=1,  # Use 2 GPUs by default
         eval_steps=20,
         save_steps=20,
-        max_length=2048,
+        max_length=1024,
     )
     
     manager.train(resume_from_step=0)
