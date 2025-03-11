@@ -1,3 +1,4 @@
+pathos==0.3.2
 torch
 transformers
 datasets
@@ -16,3 +17,4 @@ bitsandbytes
 xformers
 triton
 torchvision
+pathos==0.3.2
