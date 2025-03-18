@@ -103,6 +103,6 @@ def create_lora_model(
 if __name__ == "__main__":
     # Create LoRA version of the model
     model, tokenizer = create_lora_model(
-        base_model_path='/workspace/Qwen2.5-7B-Instruct',
-        output_dir="/workspace/Qwen2.5-7B-Instruct-qlora",
+        base_model_path='/workspace/Qwen2.5-3B-Instruct',
+        output_dir="/workspace/Qwen2.5-3B-Instruct-qlora",
     )

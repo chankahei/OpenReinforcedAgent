@@ -107,34 +107,35 @@ class TrainingManager:
         self.kill_docker_container(f"vllm-server-{device}")
         
         # Start new container with vllm model and LoRA adapter
+        cmd = f"""docker run -d --name vllm-server-{device} --rm --gpus='"device={device}"' --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+                 -v $(pwd):/workspace -p {port}:{port} \
+                 -e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 \
+                 vllm/vllm-openai:v0.7.2 \
+                 --model /workspace/{base_model_path} \
+                 --enable-lora \
+                 --lora-modules grpo=/workspace/{lora_model_path} \
+                 --tool-call-parser hermes \
+                 --enable-auto-tool-choice \
+                 --quantization bitsandbytes \
+                 --load-format bitsandbytes \
+                 --gpu-memory-utilization 0.8 \
+                 --enable_prefix_caching \
+                 --port {port} \
+                 --max_model_len {self.max_length}"""
+        
+        # lora merge is inplace
         # cmd = f"""docker run -d --name vllm-server-{device} --rm --gpus='"device={device}"' --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
         #          -v $(pwd):/workspace -p {port}:{port} \
         #          -e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 \
         #          vllm/vllm-openai:v0.7.2 \
-        #          --model /workspace/{base_model_path} \
-        #          --enable-lora \
-        #          --lora-modules grpo=/workspace/{lora_model_path} \
+        #          --model /workspace/{lora_model_path} \
         #          --tool-call-parser hermes \
         #          --enable-auto-tool-choice \
         #          --quantization bitsandbytes \
         #          --load-format bitsandbytes \
         #          --gpu-memory-utilization 0.8 \
         #          --port {port} \
-        #          --max_model_len 2048"""
-        
-        # lora merge is inplace
-        cmd = f"""docker run -d --name vllm-server-{device} --rm --gpus='"device={device}"' --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
-                 -v $(pwd):/workspace -p {port}:{port} \
-                 -e NCCL_P2P_DISABLE=1 -e NCCL_SHM_DISABLE=1 \
-                 vllm/vllm-openai:v0.7.2 \
-                 --model /workspace/{lora_model_path} \
-                 --tool-call-parser hermes \
-                 --enable-auto-tool-choice \
-                 --quantization bitsandbytes \
-                 --load-format bitsandbytes \
-                 --gpu-memory-utilization 0.8 \
-                 --port {port} \
-                 --max_model_len {self.max_length}"""
+        #          --max_model_len {self.max_length}"""
 
         try:
             result = subprocess.run(cmd, shell=True, check=True, capture_output=True)
@@ -153,7 +154,7 @@ class TrainingManager:
             python /workspace/grpo_rollout.py \
             --dataset /workspace/{dataset_path} \
             --device cuda \
-            --model /workspace/vllm-models/vllm-{steps} \
+            --model grpo \
             --num_rollouts {num_rollouts} \
             --vllm_port {vllm_port}"""
         try:
@@ -190,14 +191,21 @@ class TrainingManager:
     def spawn_training_container(self, checkpoint_path, dataset_paths, max_steps):
         """Start training container with specified parameters"""
         dataset_paths = ['/workspace/' + x for x in dataset_paths]
+        # cmd = f"""docker run -d --name training --rm --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
+        #          -v $(pwd):/workspace \
+        #          grpo:dev \
+        #          accelerate launch --config_file "deepspeed_config.yaml" grpo_trainer.py \
+        #          --checkpoint-path /workspace/{checkpoint_path} \
+        #          --dataset-paths {' '.join(dataset_paths)} \
+        #          --max-steps {max_steps}"""
+        
         cmd = f"""docker run -d --name training --rm --gpus all --ipc=host --ulimit memlock=-1 --ulimit stack=67108864 \
                  -v $(pwd):/workspace \
                  grpo:dev \
-                 accelerate launch --config_file "deepspeed_config.yaml" grpo_trainer.py \
+                 accelerate launch --num_processes=2 grpo_trainer.py \
                  --checkpoint-path /workspace/{checkpoint_path} \
                  --dataset-paths {' '.join(dataset_paths)} \
                  --max-steps {max_steps}"""
-        
         try:
             subprocess.run(cmd, shell=True, check=True)
             logging.info("Successfully started training container")
@@ -237,6 +245,8 @@ class TrainingManager:
             )
             
             parts = [x + '<|im_end|>' for x in templated_text.split('<|im_end|>') if x != '\n']
+
+            parts = [x.replace('<|im_start|>assistant\\n', '<|im_start|>assistant\\n<think>\\n') for x in parts]
 
             _input_ids = []
             _completion_masks = []
@@ -301,20 +311,20 @@ class TrainingManager:
                     checkpoint_path = checkpoint_path + f"/checkpoint-{steps}"
                 # Conversion if needed for FSDP / DS3
                 # Delete the last converted model to conserve space, except for save steps
-                if not (steps % self.save_steps == 0 and steps > 0):
-                    subprocess.run(f'docker run -v $(pwd):/workspace python bash -c "rm -rf /workspace/vllm-models/vllm-{steps-1} || true"', shell=True, check=True)
+                # if not (steps % self.save_steps == 0 and steps > 0):
+                #     subprocess.run(f'docker run -v $(pwd):/workspace python bash -c "rm -rf /workspace/vllm-models/vllm-{steps-1} || true"', shell=True, check=True)
                 
                 # Convert the current model into vLLM model
-                self.spawn_convert_container(
-                    base_model_path=self.base_model_path,
-                    lora_model_path=checkpoint_path,
-                    output_path=os.path.join('vllm-models', f"vllm-{steps}")
-                )
+                # self.spawn_convert_container(
+                #     base_model_path=self.base_model_path,
+                #     lora_model_path=checkpoint_path,
+                #     output_path=os.path.join('vllm-models', f"vllm-{steps}")
+                # )
                 
-                while True:
-                    if not self.check_container_exists(container_name="convert"):
-                        break
-                    time.sleep(10)
+                # while True:
+                #     if not self.check_container_exists(container_name="convert"):
+                #         break
+                #     time.sleep(10)
 
                 # Launch vLLM servers and rollout containers on each device
                 for device in range(self.num_devices):
@@ -323,8 +333,8 @@ class TrainingManager:
                         device=device,
                         steps=steps,
                         base_model_path=self.base_model_path, 
-                        #lora_model_path=checkpoint_path,
-                        lora_model_path=os.path.join('vllm-models', f"vllm-{steps}"), 
+                        lora_model_path=checkpoint_path,
+                        #lora_model_path=os.path.join('vllm-models', f"vllm-{steps}"), 
                         port=port
                     )
 
@@ -475,19 +485,18 @@ class TrainingManager:
 
 if __name__ == "__main__":
     manager = TrainingManager(
-        base_model_path="Qwen2.5-7B-Instruct",
-        lora_model_path="Qwen2.5-7B-Instruct-qlora",
+        base_model_path="Qwen2.5-3B-Instruct",
+        lora_model_path="Qwen2.5-3B-Instruct-qlora",
         dataset_path="dataset_curated",
-        output_dir="Qwen2.5-7B-Instruct-qlora",
+        output_dir="Qwen2.5-3B-Instruct-qlora",
         max_steps=100,
         learning_rate=1e-5,
-        batch_size=8,
-        num_rollouts=64,
+        batch_size=16,
+        num_rollouts=32,
         beta=0.04,
         num_devices=2,  # Use 2 GPUs by default
-        eval_steps=20,
+        eval_steps=100,
         save_steps=20,
-        max_length=1024*2,
+        max_length=1024*3,
     )
-
     manager.train(resume_from_step=0)

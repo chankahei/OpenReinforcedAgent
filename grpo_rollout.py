@@ -34,9 +34,9 @@ def get_mrr(condition, rollout_result):
         return 0.0
     
     mrr = 0.0
+    correct_id = condition.get('document_id')
     for retrieval in retrieved_ids:
         _retrieval = [r.split("_chunk_")[0] for r in retrieval]
-        correct_id = condition.get('document_id')
         
         if correct_id in _retrieval:
             rank = _retrieval.index(correct_id) + 1
@@ -62,17 +62,21 @@ def get_answer_similarity(embedding_function, condition, rollout_result):
     if len(model_answer) > 0:
         model_answer = model_answer[-1]
     else:
-        model_answer = model_answer[0]
+        return 0.0
 
+    # medquad
     ground_truth = condition.get('answer', None)
+    # tldr
+    # ground_truth = condition.get('completion', None)
     
     if model_answer is None:
         return 0.0
     # Get embeddings
     with torch.no_grad():
+        # prefix with 'query: ' according to https://huggingface.co/intfloat/e5-large
         embeddings = embedding_function([
-            'passage: ' + model_answer,
-            'passage: ' + ground_truth
+            'query: ' + model_answer,
+            'query: ' + ground_truth
         ])
     
     # Calculate cosine similarity
@@ -82,6 +86,30 @@ def get_answer_similarity(embedding_function, condition, rollout_result):
     )[0][0]
     
     return float(max(0, similarity))
+
+def get_completion_length(condition, rollout_result):
+    """
+    Calculate the length of the completion.
+    
+    Args:
+        condition (dict): Contains the ground truth and embedding function
+        rollout_result (list): List of messages containing model's answer
+    """
+    # Make sure last message generated and not tool call
+    if rollout_result[-1].get('role', None) != 'assistant':
+        return 0.0
+    if rollout_result[-1].get('tool_calls', None) is not None:
+        return 0.0
+    
+    model_answer = rollout_result[-1].get('content', None)
+    if model_answer is None:
+        return 0.0
+
+    if not '</think>' in model_answer:
+        return -100
+    
+    reward = -len(model_answer.split('</think>')[1].split(' '))/20 # target length of 20 words
+    return reward
 
 def get_format_reward(condition, rollout_result):
     """Calculate reward based on format compliance.
@@ -103,11 +131,6 @@ def get_format_reward(condition, rollout_result):
 
     if len(tool_calls) == 0:
         return 0.0
-    
-    num_generated_responses = len(generated_responses)
-
-    if num_generated_responses == 0:
-        return 0.0
 
     num_correct_format = 0
     
@@ -120,7 +143,7 @@ def get_format_reward(condition, rollout_result):
         if '</think>' in content:
             num_correct_format += 1
 
-    return num_correct_format / num_generated_responses
+    return num_correct_format / len(generated_responses)
 
 def get_reward_functions(embedding_function):
     """Get the reward functions with initialized embedding function.
@@ -133,6 +156,14 @@ def get_reward_functions(embedding_function):
         "answer_similarity": partial(get_answer_similarity, embedding_function),
         "format": get_format_reward
     }
+
+
+def get_tldr_reward(embedding_function):
+    return {
+        "answer_similarity": partial(get_answer_similarity, embedding_function),
+        "length": get_completion_length
+    }
+
 
 def calculate_rewards(condition, rollout_results, reward_functions, weight_scheme="uniform"):
     """Calculate rewards for a group of rollout results.
@@ -217,7 +248,7 @@ def calculate_rewards(condition, rollout_results, reward_functions, weight_schem
         "std": float(np.std(final_rewards))
     }
 
-def parse_rollout(grouped_rollout, rewards_info, filter_by_mean=True):
+def parse_rollout(grouped_rollout, rewards_info, filter_by_mean=False):
     """Create a dataset from rollout results and rewards.
     
     Args:
@@ -238,8 +269,8 @@ def parse_rollout(grouped_rollout, rewards_info, filter_by_mean=True):
         
         # Store individual metric values for each rollout BEFORE filtering
         for i in range(len(rollouts)):
-            metrics = { 
-                name: values[i] 
+            metrics = {
+                name: values[i]
                 for name, values in original_reward_by_function.items()
             }
             metrics["std"] = reward_info["std"]
@@ -307,12 +338,11 @@ def message_to_dict(message):
                 'content':message.content
             }
 
-
 def run_llm_rollout(
     dataset,
     doc_store,
     num_rollouts=64,
-    model_path="/workspace/Qwen2.5-7B-Instruct-qlora-vllm",
+    model_path="grpo",
     vllm_port=8000
 ):
     """Run LLM rollout on the dataset.
@@ -346,7 +376,7 @@ def run_llm_rollout(
             }
         }
     }]
-
+    # medquad
     system_prompt = """### Role
 You are an assistant that only answers questions about the medical document store.
 
@@ -356,9 +386,14 @@ You must perform step by step planning and reasoning every time before using too
 
 ### Planning and Reasoning Format
 Every response must begin with <think> tag, followed with step by step planning and reasoning, and then a </think> tag.
-After planning and reasoning, start your answer or tool calls.
-"""
+After planning and reasoning, start your answer or tool calls."""
+    # tldr
+#     system_prompt = """### Role
+# # You are an assistant that create short and concise summary of the inputted passage.
 
+# ### Instructions
+# # Every response must begin with <think> tag, followed with step by step planning and reasoning, and then a </think> tag."""
+    
     # Process examples
     grouped_rollout = []
     
@@ -376,12 +411,13 @@ After planning and reasoning, start your answer or tool calls.
                 },
                 {
                     'role':"user",
-                    'content':example['question']
+                    'content':example['question'], # medquad
+                    # 'content': example['prompt'], # tldr
                 }
             ]
             
             error_count = 0
-            for _ in range(2):
+            for _ in range(3):
                 try:
                     if isinstance(messages[-1], ChatCompletionMessage) and messages[-1].tool_calls:
                         messages.append({
@@ -397,7 +433,7 @@ After planning and reasoning, start your answer or tool calls.
                         chat_completion = client.chat.completions.create(
                             model=model_path,
                             messages=messages,
-                            tools=tools,
+                            tools=tools, # tldr has no tools
                         )
                         response = chat_completion.choices[0].message
                         messages.append(response)
@@ -450,19 +486,21 @@ def main():
     
     # 2. Calculate rewards
     reward_functions = get_reward_functions(embedding_function=doc_store.embedding_function)
+    # reward_functions = get_tldr_reward(embedding_function=doc_store.embedding_function)
     rewards_info = [
         calculate_rewards(
             condition=group["example"],
             rollout_results=group["rollouts"],
             reward_functions=reward_functions,
-            weight_scheme={"mrr": 1.0, "answer_similarity": 1.0, "format": 1.0}
+            weight_scheme={"mrr": 0.0, "answer_similarity": 1.0, "format": 1.0}
+            # weight_scheme={"answer_similarity": 4.0, "length": 1.0}, # tldr
         )
         for group in grouped_rollout
     ]
-    
+
     # 3. Prase results
     rollout_result = parse_rollout(grouped_rollout, rewards_info)
-    
+
     # 4. Save results using pickle
     output_path = os.path.join(args.dataset, "rollout_results.pkl")
     with open(output_path, 'wb') as f:

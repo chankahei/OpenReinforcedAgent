@@ -40,12 +40,10 @@ class GRPOTrainer(Trainer):
         epsilon=0.2,  # Clamping coefficient
         **kwargs,
     ):
-        super().__init__(model, args, **kwargs)
-        self.train_dataset = train_dataset
-        self.eval_dataset = eval_dataset
+        super().__init__(model, args, data_collator=data_collator, train_dataset=train_dataset, eval_dataset=eval_dataset, **kwargs)
         self.beta = beta
         self.epsilon = epsilon
-        self._metrics = {"kl": [], "token-loss": []}
+        self._metrics = {"kl": [], "per-token-loss": []}
         self._last_loaded_step = None
 
     def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
@@ -94,8 +92,8 @@ class GRPOTrainer(Trainer):
 
         # Update metrics
         self._metrics["kl"].append(self.accelerator.gather_for_metrics(kl.mean()).mean().item())
-        self._metrics["token-loss"].append(self.accelerator.gather_for_metrics(per_token_loss1.mean()).mean().item())
-
+        self._metrics["per-token-loss"].append(self.accelerator.gather_for_metrics(per_token_loss1.mean()).mean().item())
+        
         return loss
 
     # turn off save embedding layer
@@ -197,7 +195,7 @@ if __name__ == "__main__":
         learning_rate=1e-5,
         weight_decay=0.01,
         output_dir=output_path,
-        optim="adamw_8bit",
+        #optim="adamw_8bit",
         lr_scheduler_type="cosine",
         report_to="none",
         save_steps=1,
@@ -209,11 +207,13 @@ if __name__ == "__main__":
 
     def data_collator(features: List[Dict[str, Any]]) -> Dict[str, Any]:
         # transform to torch tensor and some reshaping
-        input_ids = torch.stack([feature["input_ids"] for feature in features], dtype=torch.long)
-        attention_mask = torch.stack([feature["attention_mask"] for feature in features],  dtype=torch.long)
-        labels = torch.stack([feature["labels"] for feature in features], dtype=torch.long)
-        advantages = torch.stack([feature["advantages"] for feature in features], dtype=torch.bfloat16)
-        ref_logprobs = torch.tensor([item for feature in feature["ref_logprobs"] for item in feature], dtype=torch.bfloat16)
+        input_ids = torch.stack([torch.tensor(feature["input_ids"], dtype=torch.long) for feature in features])
+        attention_mask = torch.stack([torch.tensor(feature["attention_mask"], dtype=torch.long) for feature in features])
+        labels = torch.stack([torch.tensor(feature["labels"], dtype=torch.long) for feature in features])
+        advantages = torch.stack([torch.tensor(feature["advantages"], dtype=torch.bfloat16) for feature in features])
+
+        ref_logprobs = [feature["ref_logprobs"] for feature in features]
+        ref_logprobs = torch.tensor([item for sublist in ref_logprobs for item in sublist], dtype=torch.bfloat16)
         return {
             "input_ids": input_ids,
             "attention_mask": attention_mask,

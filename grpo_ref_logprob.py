@@ -49,7 +49,7 @@ def run_inference(model_path, dataset_path):
             "ref_logprobs": logprobs
         }
     
-    dataset = dataset.map(compute_ref_logprobs, batched=True, batch_size=8)
+    dataset = dataset.map(compute_ref_logprobs, batched=True, batch_size=2)
 
     dataset.save_to_disk(args.dataset_path+ "_ref_logprobs")
 
